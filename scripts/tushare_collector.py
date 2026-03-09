@@ -18,6 +18,12 @@ import time
 import pandas as pd
 import tushare as ts
 
+try:
+    import yfinance as yf
+    _yf_available = True
+except ImportError:
+    _yf_available = False
+
 from config import get_token, validate_stock_code
 from format_utils import format_number, format_table, format_header
 
@@ -42,6 +48,41 @@ class TushareClient:
         self.pro = ts.pro_api(timeout=30)
         self.token = token
         self._store = {}  # {key: pd.DataFrame} for derived metrics computation
+        self._yf_available = _yf_available
+
+    @staticmethod
+    def _detect_currency(ts_code: str) -> str:
+        """Detect reporting currency based on stock code suffix."""
+        return "HKD" if ts_code.upper().endswith(".HK") else "CNY"
+
+    @staticmethod
+    def _yf_ticker(ts_code: str) -> str:
+        """Convert Tushare stock code to yfinance ticker symbol."""
+        code, suffix = ts_code.rsplit(".", 1)
+        suffix = suffix.upper()
+        if suffix == "SH":
+            return f"{code}.SS"
+        elif suffix == "SZ":
+            return f"{code}.SZ"
+        elif suffix == "HK":
+            # Remove leading zeros for HK stocks (e.g., 00700 -> 0700)
+            return f"{code.lstrip('0') or '0'}.HK"
+        return ts_code
+
+    def _yf_fallback_price(self, ts_code: str) -> dict | None:
+        """Fetch basic price/market cap via yfinance as fallback."""
+        if not self._yf_available:
+            return None
+        try:
+            ticker = yf.Ticker(self._yf_ticker(ts_code))
+            info = ticker.info
+            return {
+                "close": info.get("regularMarketPrice") or info.get("previousClose"),
+                "market_cap": info.get("marketCap"),
+                "source": "yfinance (降级)",
+            }
+        except Exception:
+            return None
 
     @rate_limit
     def _safe_call(self, api_name: str, **kwargs) -> pd.DataFrame:
@@ -1508,15 +1549,35 @@ class TushareClient:
         fcf = fcf_yuan / 1e6
 
         # ===== Part A: Valuation indicators =====
-        ev = mkt_cap + ibd - cash
+        # Manual calculations (fallback)
         ebitda = oper_profit + fin_exp + da
-        net_cash = cash - ibd
+        net_debt = ibd - cash  # positive = net debt, negative = net cash
+
+        # Prefer fina_indicator pre-computed values when available
+        fi_df = self._store.get("fina_indicators")
+        if fi_df is not None and not fi_df.empty:
+            fi_annual = fi_df[fi_df["end_date"].str.endswith("1231")].sort_values(
+                "end_date", ascending=False)
+            if not fi_annual.empty:
+                fi_row = fi_annual.iloc[0]
+                v = self._safe_float(fi_row.get("ebitda"))
+                if v is not None:
+                    ebitda = v / 1e6
+                v = self._safe_float(fi_row.get("netdebt"))
+                if v is not None:
+                    net_debt = v / 1e6
+                v = self._safe_float(fi_row.get("fcff"))
+                if v is not None:
+                    fcf = v / 1e6
+
+        ev = mkt_cap + net_debt
+        net_cash = -net_debt
 
         ev_ebitda = f"{ev / ebitda:.2f}x" if ebitda > 0 else "—"
         cash_pe = f"{(mkt_cap - net_cash) / np_parent:.2f}x" if np_parent > 0 else "—"
         fcf_yield = f"{fcf / mkt_cap * 100:.2f}%" if mkt_cap > 0 else "—"
         pb = f"{mkt_cap / equity:.2f}x" if equity > 0 else "—"
-        net_debt_ebitda = f"{(ibd - cash) / ebitda:.2f}x" if ebitda > 0 else "—"
+        net_debt_ebitda = f"{net_debt / ebitda:.2f}x" if ebitda > 0 else "—"
         goodwill_ratio = f"{goodwill / ta * 100:.2f}%" if ta > 0 else "—"
         ibd_ratio = f"{ibd / ta * 100:.2f}%" if ta > 0 else "—"
 
@@ -1624,14 +1685,9 @@ class TushareClient:
 
         # ===== Part C: Composite baseline =====
         if valid_prices:
-            sorted_prices = sorted(valid_prices)
-            n = len(sorted_prices)
-            if n % 2 == 1:
-                composite = sorted_prices[n // 2]
-            else:
-                composite = (sorted_prices[n // 2 - 1] + sorted_prices[n // 2]) / 2
+            composite = sum(valid_prices) / len(valid_prices)
 
-            lines.append(f"**综合基准价（中位数）= {composite:.2f} 元**")
+            lines.append(f"**综合基准价（算术平均）= {composite:.2f} 元**")
 
             if len(valid_prices) < 3:
                 lines.append("*数据不足（有效方法<3），仅供参考*")
@@ -2153,16 +2209,18 @@ class TushareClient:
     def assemble_data_pack(self, ts_code: str) -> str:
         """Assemble complete data_pack_market.md combining all sections."""
         timestamp = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+        currency = self._detect_currency(ts_code)
+        unit_label = "百万港元" if currency == "HKD" else "百万元"
         lines = [
             format_header(1, f"数据包 — {ts_code}"),
             "",
             f"*生成时间: {timestamp}*",
             f"*数据来源: Tushare Pro*",
-            f"*金额单位: 百万元 (除特殊标注)*",
-            "",
-            "---",
-            "",
+            f"*金额单位: {unit_label} (除特殊标注)*",
         ]
+        if currency == "HKD":
+            lines.append(f"*报表币种: HKD*")
+        lines.extend(["", "---", ""])
 
         sections = [
             ("1. 基本信息", self.get_basic_info),
@@ -2190,8 +2248,20 @@ class TushareClient:
                 lines.append("")
                 completed += 1
             except Exception as e:
-                lines.append(format_header(2, name))
-                lines.append(f"\n数据获取失败: {e}\n")
+                # Attempt yfinance fallback for market data sections
+                yf_data = self._yf_fallback_price(ts_code)
+                if yf_data and name in ("1. 基本信息", "2. 市场行情"):
+                    lines.append(format_header(2, name))
+                    lines.append(f"\n*来源: yfinance (降级)*")
+                    if yf_data.get("close"):
+                        lines.append(f"- 当前价格: {yf_data['close']}")
+                    if yf_data.get("market_cap"):
+                        lines.append(f"- 总市值: {format_number(yf_data['market_cap'], divider=1e6)}")
+                    lines.append("")
+                    completed += 1
+                else:
+                    lines.append(format_header(2, name))
+                    lines.append(f"\n数据获取失败: {e}\n")
 
         # Audit info (sub-section of 7)
         try:

@@ -51,7 +51,8 @@ _TIER2_FIELDS = {
                  "depr_fa_coga_dpba,amort_intang_assets,lt_amort_deferred_exp"),
     "dividend": "ts_code,end_date,cash_div_tax,base_share",
     "fina_indicator": ("ts_code,end_date,roe_waa,grossprofit_margin,"
-                       "debt_to_assets,profit_dedt"),
+                       "debt_to_assets,profit_dedt,"
+                       "ebitda,fcff,netdebt,interestdebt"),
     "fina_audit": "ts_code,end_date,audit_result",
     "pledge_stat": "ts_code,end_date,pledge_count,pledge_ratio",
     "weekly": "ts_code,trade_date,close",
@@ -696,6 +697,21 @@ class TushareScreener:
             except (TypeError, ValueError):
                 return None
 
+        # Try pre-computed values from fina_indicator (already cached)
+        fi_ebitda = fi_netdebt = fi_fcff = None
+        try:
+            fi_df = self._cached_call("fina_indicator", ts_code=ts_code)
+            if not fi_df.empty:
+                fi_sorted = fi_df.sort_values("end_date", ascending=False)
+                annual_fi = fi_sorted[fi_sorted["end_date"].str.endswith("1231")]
+                if not annual_fi.empty:
+                    fi_row = annual_fi.iloc[0]
+                    fi_ebitda = _sf(fi_row.get("ebitda"))
+                    fi_netdebt = _sf(fi_row.get("netdebt"))
+                    fi_fcff = _sf(fi_row.get("fcff"))
+        except Exception:
+            pass
+
         # Process income
         if not income_df.empty:
             income_df = income_df.sort_values("end_date", ascending=False)
@@ -783,17 +799,35 @@ class TushareScreener:
         ibd = result.get("ibd", 0)
         np_parent = result.get("np_parent")
 
-        if oper_profit is not None:
+        # EBITDA: prefer fina_indicator, fallback to manual
+        ebitda = None
+        if fi_ebitda is not None:
+            ebitda = fi_ebitda / 1e6
+        elif oper_profit is not None:
             ebitda = oper_profit + (fin_exp or 0) + da
+
+        # Net debt: prefer fina_indicator, fallback to manual
+        if fi_netdebt is not None:
+            net_debt_m = fi_netdebt / 1e6
+        else:
+            net_debt_m = ibd - cash
+
+        if ebitda is not None:
             result["ebitda"] = ebitda
-            ev = mkt_cap + ibd - cash
+            ev = mkt_cap + net_debt_m
             result["ev"] = ev
 
             if ebitda > 0:
                 result["ev_ebitda"] = ev / ebitda
-                result["net_debt_ebitda"] = (ibd - cash) / ebitda
+                result["net_debt_ebitda"] = net_debt_m / ebitda
 
-        net_cash = cash - ibd
+        # FCF: prefer fina_indicator, fallback to manual (already set above)
+        if fi_fcff is not None:
+            result["fcf"] = fi_fcff / 1e6
+            if mkt_cap > 0:
+                result["fcf_yield"] = (fi_fcff / 1e6) / mkt_cap * 100
+
+        net_cash = -net_debt_m
         if np_parent is not None and np_parent > 0:
             result["cash_adj_pe"] = (mkt_cap - net_cash) / np_parent
 
@@ -889,15 +923,10 @@ class TushareScreener:
 
         result["baselines"] = baselines
 
-        # Composite = median of valid methods
+        # Composite = arithmetic mean of valid methods
         valid_prices = [v for _, v in baselines]
         if valid_prices:
-            sorted_p = sorted(valid_prices)
-            n = len(sorted_p)
-            if n % 2 == 1:
-                composite = sorted_p[n // 2]
-            else:
-                composite = (sorted_p[n // 2 - 1] + sorted_p[n // 2]) / 2
+            composite = sum(valid_prices) / len(valid_prices)
             result["composite_baseline"] = composite
             result["premium"] = (close / composite - 1) * 100 if composite > 0 else None
         else:
