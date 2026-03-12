@@ -19,7 +19,9 @@ ENV/
 *.swo
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/commands/
+!.claude/skills/
 .agents/
 
 # OS
