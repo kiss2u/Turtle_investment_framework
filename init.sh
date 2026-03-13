@@ -15,7 +15,7 @@ echo ""
 VENV_DIR="$PROJECT_ROOT/.venv"
 PYTHON_BIN="$VENV_DIR/bin/python"
 
-echo "[1/6] Setting up Python environment..."
+echo "[1/5] Setting up Python environment..."
 
 # Find a Python >= 3.10 by searching common candidates
 PYTHON_SYS=""
@@ -55,7 +55,7 @@ echo "  Python: $($PYTHON_BIN --version)"
 echo "  Using: $PYTHON_BIN"
 
 # 2. Install dependencies (on first create or --force-install)
-echo "[2/6] Installing Python dependencies..."
+echo "[2/5] Installing Python dependencies..."
 if [ "$VENV_JUST_CREATED" -eq 1 ] || [ "$1" = "--force-install" ]; then
     $PYTHON_BIN -m pip install -q -r requirements.txt
     echo "  Dependencies installed."
@@ -81,22 +81,12 @@ else
     echo "  TUSHARE_TOKEN: set (${#TUSHARE_TOKEN} chars)"
 fi
 
-# 4. Verify snowball-report-downloader dependency
-echo "[4/6] Checking snowball-report-downloader..."
-SNOWBALL_PATH="$(dirname "$PROJECT_ROOT")/SKILL_snowball_report_download"
-if [ -d "$SNOWBALL_PATH" ]; then
-    echo "  Found at: $SNOWBALL_PATH"
-else
-    echo "  WARNING: snowball-report-downloader not found at $SNOWBALL_PATH"
-    echo "  Phase 0 (PDF auto-download) will not be available"
-fi
-
-# 5. Create output directory
-echo "[5/6] Ensuring output directory..."
+# 4. Create output directory
+echo "[4/5] Ensuring output directory..."
 mkdir -p output
 
-# 6. Run basic tests
-echo "[6/6] Running verification tests..."
+# 5. Run basic tests
+echo "[5/5] Running verification tests..."
 $PYTHON_BIN -m pytest tests/ -x -q --tb=short 2>&1 | tail -5
 
 echo ""

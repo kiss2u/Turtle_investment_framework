@@ -11,7 +11,7 @@ Read prompts/coordinator.md for the full pipeline specification, then execute ea
 
 ### Phase 0: PDF Acquisition (conditional)
 - Check if annual report PDF already exists in output/{code}_{company}/
-- If not found, use snowball-report-downloader (../SKILL_snowball_report_download/) to search and download
+- If not found, use /download-report command (scripts/download_report.py) to search and download
 - If download fails, proceed without PDF (graceful degradation)
 
 ### Phase 1A: Tushare Data Collection (Python script)
