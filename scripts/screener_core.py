@@ -175,6 +175,9 @@ class TushareScreener:
             import tushare as ts
             ts.set_token(self._token)
             self._pro = ts.pro_api(timeout=30)
+            api_url = os.environ.get("TUSHARE_API_URL", "")
+            if api_url:
+                self._pro._TuShareBase__url = api_url
         return self._pro
 
     def _safe_call(self, api_name: str, **kwargs) -> pd.DataFrame:
@@ -191,6 +194,9 @@ class TushareScreener:
                 if attempt < 3:
                     import tushare as ts
                     self._pro = ts.pro_api(timeout=30)
+                    api_url = os.environ.get("TUSHARE_API_URL", "")
+                    if api_url:
+                        self._pro._TuShareBase__url = api_url
                     time.sleep(1.0 * attempt)
         raise RuntimeError(f"Tushare API '{api_name}' failed after 3 retries: {last_err}")
 
